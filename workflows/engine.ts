@@ -17,11 +17,11 @@ export const processTask = (task: WorkflowTask) =>
         ));
 
         // Execute workflow based on type
-        let resultEffect;
+        let resultEffect: Effect.Effect<any, any, any>;
         if (task.type === "AgendamentoCompraCDB") {
             // Decode payload
             const payload = yield* _(S.decodeUnknown(TaskPayload)(task.payload));
-            resultEffect = runAgendamentoCompraCDB(payload);
+            resultEffect = runAgendamentoCompraCDB(payload as any);
         } else {
             return yield* _(Effect.fail(new Error(`Unknown task type: ${task.type}`)));
         }

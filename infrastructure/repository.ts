@@ -43,26 +43,32 @@ export const MySQLServiceLive = Layer.scoped(
 
         const withTransaction = <A, E, R>(
             f: (connection: mysql.PoolConnection) => Effect.Effect<A, E, R>
-        ) =>
+        ): Effect.Effect<A, E | DatabaseError, R> =>
             Effect.scoped(
                 Effect.gen(function* (_) {
                     const connection = yield* _(
                         Effect.acquireRelease(
                             Effect.promise(() => pool.getConnection()),
-                            (conn) => Effect.promise(() => conn.release())
+                            (conn: mysql.PoolConnection) => {
+                                return Effect.sync(() => conn.release());
+                            }
                         )
                     );
 
                     yield* _(Effect.promise(() => connection.beginTransaction()));
 
-                    return yield* _(
+                    const result = yield* _(
                         f(connection).pipe(
                             Effect.tap(() => Effect.promise(() => connection.commit())),
                             Effect.catchAll((error) =>
-                                Effect.promise(() => connection.rollback()).pipe(Effect.flatMap(() => Effect.fail(error)))
+                                Effect.promise(() => connection.rollback()).pipe(
+                                    Effect.flatMap(() => Effect.fail(error))
+                                )
                             )
                         )
                     );
+
+                    return result;
                 })
             );
 

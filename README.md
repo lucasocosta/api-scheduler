@@ -43,6 +43,24 @@ A resilient, distributed workflow engine built with **TypeScript** and the **Eff
    ```
 
 The application will start picking up tasks from the `workflow_tasks` table.
+46: 
+47: ## 🧪 Validation & Testing
+48: 
+49: To verify the application is working correctly, you can manually insert a task and observe the logs.
+50: 
+51: 1. **Check Logs**:
+52:    ```bash
+53:    docker-compose logs -f app
+54:    ```
+55: 
+56: 2. **Insert Test Task**:
+57:    Run the following command to insert a task into the running database:
+58:    ```bash
+59:    docker exec workflow_db mysql -uroot -proot scheduler -e "INSERT INTO workflow_tasks (id, idempotency_key, type, payload) VALUES (UUID(), 'test-manual-01', 'AgendamentoCompraCDB', '{\"userId\": \"user-123\", \"amount\": 500, \"cdbId\": \"cdb-001\"}');"
+60:    ```
+61: 
+62: 3. **Verify Result**:
+63:    In the log window, you should see messages indicating the task was picked up, processed, and completed.
 
 ## 📝 Example Schema
 

@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "simulate": "tsx scripts/simulate_run.ts",
+    "create-tasks": "tsx scripts/create_tasks.ts"
   },
   "keywords": [],
   "author": "",
@@ -14,10 +16,13 @@
   "dependencies": {
     "@effect/schema": "^0.75.5",
     "effect": "^3.19.14",
-    "mysql2": "^3.16.0"
+    "mysql2": "^3.16.0",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "tsx": "^4.7.0",
+    "@types/uuid": "^9.0.8"
   }
 }

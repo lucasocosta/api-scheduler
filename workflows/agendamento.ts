@@ -1,33 +1,112 @@
-import { Effect, Schedule } from "effect";
+import { Effect, Schedule, Console } from "effect";
 import { CDBPayload } from "../domain/schemas";
 import * as Activities from "../services/activities";
+import { MySQLService } from "../infrastructure/repository";
 
-export const runAgendamentoCompraCDB = (payload: typeof CDBPayload.Type) =>
+export const runAgendamentoCompraCDB = (payload: typeof CDBPayload.Type, taskId?: string) =>
     Effect.gen(function* (_) {
-        // 1. Validate Market Time
-        yield* _(Activities.validateMarketTime(payload.userId));
+        const db = yield* _(MySQLService);
 
-        // 2. Reserve Balance (with compensation)
-        const reservationId = yield* _(Activities.reserveBalance(payload.userId, payload.amount));
+        if (!taskId) {
+            return yield* _(Effect.dieMessage("TaskId is required for persistence."));
+        }
 
-        // Define compensation for balance reservation
-        const compensation = Activities.compensateBalance(payload.userId, payload.amount, reservationId);
+        const currentTaskId = taskId;
 
-        // 3. Execute Order (Retry logic for network issues)
-        const orderResult = yield* _(
-            Activities.executeOrder(payload.cdbId, payload.amount).pipe(
-                Effect.retry(
-                    Schedule.exponential("100 millis").pipe(
-                        Schedule.andThen(Schedule.recurs(5))
-                    )
-                ),
-                // Saga Pattern: If order fails after retries, compensate the balance
-                Effect.onInterrupt(() => compensation),
-                Effect.catchAll((error) =>
-                    compensation.pipe(Effect.flatMap(() => Effect.fail(error)))
-                )
-            )
+        yield* _(db.updateTaskStatus(currentTaskId, "PROCESSING"));
+        yield* _(Console.log(`[Workflow] Starting CDB Purchase for ${payload.userId} (Task: ${currentTaskId})`));
+
+        const compensations: Effect.Effect<void>[] = [];
+
+        const addCompensation = (comp: Effect.Effect<void>) => {
+            compensations.push(comp);
+        };
+
+        const runCompensations = Effect.gen(function* (_) {
+            if (compensations.length === 0) return;
+            yield* _(Console.log(`[Workflow] ⚠️ Workflow failed. Executing compensations...`));
+
+            yield* _(db.updateCompensationStatus(currentTaskId, "COMPENSATING"));
+
+            // Run in reverse order (LIFO)
+            const reversed = [...compensations].reverse();
+            for (const comp of reversed) {
+                yield* _(comp);
+            }
+            yield* _(Console.log(`[Workflow] Compensations completed.`));
+            yield* _(db.updateCompensationStatus(currentTaskId, "COMPENSATED"));
+        });
+
+        const retryPolicy = Schedule.exponential("100 millis").pipe(
+            Schedule.intersect(Schedule.recurs(3))
         );
 
-        return orderResult;
+        // Helper to apply selective retry
+        const withRetry = <A, E>(effect: Effect.Effect<A, E>) =>
+            effect.pipe(
+                Effect.retry({
+                    schedule: retryPolicy,
+                    while: (error: any) => {
+                        // Retry ONLY if it's explicitly marked as retryable
+                        if (error && typeof error === 'object' && 'retryable' in error) {
+                            return error.retryable === true;
+                        }
+                        // If it's another type of error (e.g. business rule), do NOT retry
+                        return false;
+                    }
+                })
+            );
+
+        // Main Workflow Logic
+        const workflowLogic = Effect.gen(function* (_) {
+            // 1. Validate Market Time
+            yield* _(Activities.validateMarketTime(payload.userId));
+
+            // 2. Schedule Debit
+            const scheduleId = yield* _(
+                withRetry(Activities.scheduleDebit(payload.userId, payload.amount))
+            );
+            addCompensation(Activities.cancelScheduleDebit(scheduleId));
+
+            // 3. Confirm Debit (Async/SQS)
+            const confirmationId = yield* _(
+                withRetry(Activities.confirmDebit(scheduleId))
+            );
+            addCompensation(Activities.cancelDebitConfirmation(confirmationId));
+
+            // 4. Execute Transfer (Async/SQS)
+            const transferId = yield* _(
+                withRetry(Activities.executeTransfer(confirmationId))
+            );
+            addCompensation(Activities.reverseTransfer(transferId));
+
+            // 5. Emit CDB
+            const cdbId = yield* _(
+                withRetry(Activities.emitCdb(transferId, payload.amount))
+            );
+
+            yield* _(Console.log(`[Workflow] ✅ CDB Purchase Complete! ID: ${cdbId}`));
+            yield* _(db.updateTaskStatus(currentTaskId, "COMPLETED"));
+            return cdbId;
+        });
+
+        // Execute logic and catch ANY error (Failure)
+        return yield* _(
+            workflowLogic.pipe(
+                Effect.catchAll((error) => Effect.gen(function* (_) {
+                    yield* _(Console.error(`[Workflow] ❌ Workflow Failed. Error: ${JSON.stringify(error)}`));
+
+                    const isFatal = (error && typeof error === 'object' && 'retryable' in error && (error as any).retryable === false);
+
+                    // Persist FAILED status with retry increment (or stop if fatal)
+                    yield* _(db.failTask(currentTaskId, JSON.stringify(error), isFatal));
+
+                    // Run compensations
+                    yield* _(runCompensations);
+
+                    // Re-fail so the caller knows it failed
+                    return yield* _(Effect.fail(error));
+                }))
+            )
+        );
     });

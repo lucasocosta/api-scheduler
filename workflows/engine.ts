@@ -10,36 +10,26 @@ export const processTask = (task: WorkflowTask) =>
 
         yield* _(Console.log(`[Engine] Processing task ${task.id} (Type: ${task.type})`));
 
-        // Update status to PROCESSING
-        yield* _(mysql.query(
-            "UPDATE workflow_tasks SET status = 'PROCESSING' WHERE id = ?",
-            [task.id]
-        ));
-
         // Execute workflow based on type
         let resultEffect: Effect.Effect<any, any, any>;
         if (task.type === "AgendamentoCompraCDB") {
             // Decode payload
             const payload = yield* _(S.decodeUnknown(TaskPayload)(task.payload));
-            resultEffect = runAgendamentoCompraCDB(payload as any);
+            // Pass task.id to the workflow so it can persist state
+            resultEffect = runAgendamentoCompraCDB(payload as any, task.id);
         } else {
             return yield* _(Effect.fail(new Error(`Unknown task type: ${task.type}`)));
         }
 
-        // Run workflow and handle results
+        // Run workflow
+        // The workflow itself now handles DB updates (PROCESSING -> COMPLETED/FAILED)
+        // We catch any unexpected Defect here just in case.
         yield* _(
             resultEffect.pipe(
-                Effect.tap(() =>
-                    mysql.query(
-                        "UPDATE workflow_tasks SET status = 'COMPLETED' WHERE id = ?",
-                        [task.id]
-                    )
-                ),
                 Effect.catchAll((error) =>
-                    mysql.query(
-                        "UPDATE workflow_tasks SET status = 'FAILED', last_error = ?, retry_count = retry_count + 1 WHERE id = ?",
-                        [(error as Error).stack || (error as Error).message, task.id]
-                    )
+                    // Logic in workflow already handles catching and updating DB for failures.
+                    // But if it fails, we log here too.
+                    Console.error(`[Engine] Workflow failed for ${task.id}:`, error)
                 )
             )
         );
@@ -75,9 +65,17 @@ export const engineLoop = () =>
         yield* _(
             Effect.repeat(
                 Effect.gen(function* (_) {
-                    const task = yield* _(pollAndLockTask());
+                    const task = yield* _(pollAndLockTask().pipe(
+                        Effect.catchAll(err => {
+                            Console.error("[Engine] Error polling task:", err);
+                            return Effect.succeed(null);
+                        })
+                    ));
+
                     if (task) {
-                        yield* _(processTask(task));
+                        yield* _(processTask(task).pipe(
+                            Effect.catchAll(err => Console.error(`[Engine] Error processing task ${task.id}:`, err))
+                        ));
                     } else {
                         // No tasks, wait a bit
                         yield* _(Effect.sleep("1 seconds"));

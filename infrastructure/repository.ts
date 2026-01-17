@@ -12,6 +12,7 @@ export interface MySQLService {
     readonly updateTaskStatus: (id: string, status: string, lastError?: string) => Effect.Effect<void, DatabaseError>;
     readonly updateCompensationStatus: (id: string, status: string) => Effect.Effect<void, DatabaseError>;
     readonly findNextPendingTask: () => Effect.Effect<{ id: string; payload: any } | null, DatabaseError>;
+    readonly failTask: (id: string, error: string, isFatal?: boolean) => Effect.Effect<void, DatabaseError>;
 }
 
 export const MySQLService = Context.GenericTag<MySQLService>("MySQLService");
@@ -106,6 +107,12 @@ export const MySQLServiceLive = Layer.scoped(
                 })
             );
 
-        return { pool, query, withTransaction, createTask, updateTaskStatus, updateCompensationStatus, findNextPendingTask };
+        const failTask = (id: string, error: string, isFatal: boolean = false) =>
+            query(
+                `UPDATE workflow_tasks SET status = 'FAILED', last_error = ?, retry_count = IF(?, 99, retry_count + 1) WHERE id = ?`,
+                [error, isFatal, id]
+            ).pipe(Effect.asVoid);
+
+        return { pool, query, withTransaction, createTask, updateTaskStatus, updateCompensationStatus, findNextPendingTask, failTask };
     })
 );

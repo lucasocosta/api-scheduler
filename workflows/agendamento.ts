@@ -96,8 +96,10 @@ export const runAgendamentoCompraCDB = (payload: typeof CDBPayload.Type, taskId?
                 Effect.catchAll((error) => Effect.gen(function* (_) {
                     yield* _(Console.error(`[Workflow] ❌ Workflow Failed. Error: ${JSON.stringify(error)}`));
 
-                    // Persist FAILED status
-                    yield* _(db.updateTaskStatus(currentTaskId, "FAILED", JSON.stringify(error)));
+                    const isFatal = (error && typeof error === 'object' && 'retryable' in error && (error as any).retryable === false);
+
+                    // Persist FAILED status with retry increment (or stop if fatal)
+                    yield* _(db.failTask(currentTaskId, JSON.stringify(error), isFatal));
 
                     // Run compensations
                     yield* _(runCompensations);

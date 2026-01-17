@@ -6,10 +6,13 @@ A resilient, distributed workflow engine built with **TypeScript** and the **Eff
 
 - **Effect-driven Architecture**: Leverages Effect's powerful resource management, error handling, and concurrency primitives.
 - **MySQL Queue Pattern**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` for safe, distributed task polling across multiple workers.
-- **Idempotency**: Native support for `idempotency_key` to prevent duplicate processing of financial operations.
-- **Saga Pattern**: Automatic compensation logic for multi-step workflows.
-- **Retry Policies**: Advanced exponential backoff and retry mechanisms for external API calls.
-- **Graceful Shutdown**: Ensures all database connections and pending operations are safely closed on interruption.
+- **Fail-Safe & ID Generation**: Tasks use UUIDs and support idempotency keys to prevent double-processing.
+- **Robust Error Handling**:
+    - **Transient Errors**: Automatically retried (exponential backoff).
+    - **Fatal Errors**: Immediately fail the task and stop retries to avoid infinite loops.
+- **Saga Pattern & Compensation**:
+    - Tracks `compensation_status` (COMPENSATING, COMPENSATED).
+    - Automatically executes compensation steps in reverse order (LIFO) upon workflow failure.
 - **Dockerized**: Ready-to-go environment with Docker and Docker Compose.
 
 ## 📁 Project Structure
@@ -17,10 +20,11 @@ A resilient, distributed workflow engine built with **TypeScript** and the **Eff
 ```text
 /domain/errors.ts      # Custom error classes (Data.TaggedError)
 /domain/schemas.ts     # Data validation (Effect/Schema)
-/services/activities.ts # Atomic workflow steps
+/services/activities.ts # Atomic workflow steps & Simulations
 /infrastructure        # MySQL Connection Pool & Repo
 /workflows/engine.ts   # Core polling and execution logic
-/workflows/agendamento.ts # Specific CDB scheduling implementation
+/workflows/agendamento.ts # Specific CDB scheduling workflow
+/scripts               # Helper scripts (create tasks, run simulations)
 ```
 
 ## 🛠️ Getting Started
@@ -39,32 +43,71 @@ A resilient, distributed workflow engine built with **TypeScript** and the **Eff
 
 2. **Start the infrastructure and application**:
    ```bash
-   docker-compose up --build
+   docker compose up --build
    ```
+   
+   The application will start the Engine, which polls for `PENDING` tasks.
 
-The application will start picking up tasks from the `workflow_tasks` table.
+## 🧪 Simulation & Testing
 
-## 🧪 Validation & Testing
+We provide scripts to simulate realistic scenarios (Transient Failures, Fatal Failures, Compensations).
 
-To verify the application is working correctly, you can manually insert a task and observe the logs.
+### 1. Create Tasks and Run Simulation
 
-1. **Check Logs**:
+Since the engine polls the database, you first need to populates it with tasks.
+
+1. **Create Tasks**:
+   Generates random tasks with status `PENDING`.
    ```bash
-   docker-compose logs -f app
+   docker compose exec app npm run create-tasks
    ```
 
-2. **Insert Test Task**:
-   Run the following command to insert a task into the running database:
+2. **Run Tasks**:
+   The engine (running in the background) will automatically pick up these tasks. You can watch the logs:
    ```bash
-   docker exec workflow_db mysql -uroot -proot scheduler -e "INSERT INTO workflow_tasks (id, idempotency_key, type, payload) VALUES (UUID(), 'test-manual-01', 'AgendamentoCompraCDB', '{\"userId\": \"user-123\", \"amount\": 500, \"cdbId\": \"cdb-001\"}');"
+   docker compose logs -f app
    ```
 
-3. **Verify Result**:
-   In the log window, you should see messages indicating the task was picked up, processed, and completed.
+### 2. Manual Simulation (Optional)
+If you want to run a specific simulation logic manually (forcing the worker to consume a pending task immediately for testing):
 
-## 📝 Example Schema
+```bash
+docker compose exec app npm run simulate
+```
 
-The engine expects a `workflow_tasks` table. See `db/init.sql` for the full schema definition.
+### 3. Verification
+
+Observe the logs or query the database to see the states:
+
+*   **Success**: `status` = 'COMPLETED'
+*   **Retryable Failure**: Log shows "TRANSIENT ERROR", keeps retrying.
+*   **Fatal Failure**: `status` = 'FAILED', `retry_count` = 99 (stops processing), `compensation_status` = 'COMPENSATED' (if compensations ran).
+
+## 📝 Database Schema
+
+The `workflow_tasks` table now supports advanced status tracking:
+
+| Column | Description |
+| :--- | :--- |
+| `id` | UUID of the task. |
+| `status` | PENDING, PROCESSING, COMPLETED, FAILED. |
+| `compensation_status` | NONE, COMPENSATING, COMPENSATED. |
+| `retry_count` | Number of retries. If 99, it means a Fatal Error occurred. |
+| `payload` | JSON payload for the task. |
+
+(See `db/init.sql` for full definition).
+
+## 🔧 Troubleshooting
+
+- **Application Code Updates**:
+  If you modify `.ts` files locally, the changes won't reflect in the container automatically because the Dockerfile runs `npm run build`. You must rebuild:
+  ```bash
+  docker compose exec app npm run build
+  docker compose restart app
+  ```
+
+- **Infinite Loops**:
+  If the engine keeps processing a failed task, ensure it's marked as Fatal. The system logic sets `retry_count` to 99 for non-retryable errors to prevent this.
 
 ## ⚙️ Environment Variables
 
